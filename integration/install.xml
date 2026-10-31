@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?>
+<modification>
+    <name>OCNP Nova Poshta - API for Simple fields</name>
+    <code>OCNP_SIMPLE_API</code>
+    <version>OCNPNOVAPOSHTASIMPLE1.0.0.1</version>
+    <author>volnorez</author>
+	<link>https://opencart.com</link>
+
+    <!-- Методи для випадаючих списків Simple (береться з таблиць модуля OCNP) -->
+    <file path="catalog/model/tool/simpleapimain.php|catalog/model/tool/simpleapicustom.php">
+        <operation>
+            <search><![CDATA[extends Model {]]></search>
+            <add position="after"><![CDATA[
+    /* START OCNP Nova Poshta */
+    private function ocnpField() {
+        return ($this->language->get('code') == 'ru') ? 'DescriptionRu' : 'Description';
+    }
+
+    private function ocnpValues($rows, $field) {
+        $values = array(
+            array('id' => '', 'text' => $this->language->get('text_select'))
+        );
+
+        if (!$rows) {
+            $values[] = array('id' => 0, 'text' => $this->language->get('text_none'));
+            return $values;
+        }
+
+        foreach ($rows as $row) {
+            $value = trim($row[$field]);
+
+            if ($value !== '') {
+                $values[] = array('id' => $value, 'text' => $value);
+            }
+        }
+
+        return $values;
+    }
+
+    // zone_id OpenCart -> Ref області Нової Пошти (за початком назви: "Київська область" -> "Київська")
+    private function ocnpAreaRef($zone_id) {
+        $zone = $this->db->query("SELECT `name` FROM `" . DB_PREFIX . "zone` WHERE zone_id = '" . (int)$zone_id . "'");
+
+        if (!$zone->num_rows) {
+            return '';
+        }
+
+        $name = trim(preg_replace('/\s*(область|обл\.?)$/iu', '', $zone->row['name']));
+
+        if ($name === '') {
+            return '';
+        }
+
+        $like = $this->db->escape($name);
+
+        $query = $this->db->query("SELECT `Ref` FROM `" . DB_PREFIX . "ocnp_novaposhta_areas` WHERE `Description` LIKE '" . $like . "%' OR `DescriptionRu` LIKE '" . $like . "%' ORDER BY CHAR_LENGTH(`Description`) ASC LIMIT 1");
+
+        return $query->num_rows ? $query->row['Ref'] : '';
+    }
+
+    // зона, яку Simple міг передати разом з формою (для розрізнення міст з однаковою назвою)
+    private function ocnpPostedAreaRef() {
+        $zone_id = 0;
+
+        foreach ($this->request->post as $key => $value) {
+            if (is_scalar($value) && (int)$value && substr($key, -7) == 'zone_id') {
+                if (strpos($key, 'shipping') !== false) {
+                    $zone_id = (int)$value;
+                    break;
+                }
+
+                if (!$zone_id) {
+                    $zone_id = (int)$value;
+                }
+            }
+        }
+
+        return $zone_id ? $this->ocnpAreaRef($zone_id) : '';
+    }
+
+    // Області з довідника OCNP: показуємо назву НП, а значенням лишаємо zone_id OpenCart (для України)
+    public function getOcnpAreas($country_id = 0) {
+        $field = $this->ocnpField();
+
+        $values = array(
+            array('id' => '', 'text' => $this->language->get('text_select'))
+        );
+
+        $country = $this->db->query("SELECT country_id FROM `" . DB_PREFIX . "country` WHERE iso_code_2 = 'UA' LIMIT 1");
+
+        $areas = $this->db->query("SELECT `Description`, `DescriptionRu` FROM `" . DB_PREFIX . "ocnp_novaposhta_areas` ORDER BY `" . $field . "`");
+
+        if ($country->num_rows) {
+            foreach ($areas->rows as $area) {
+                $name = trim($area['Description']);
+
+                if ($name === '') {
+                    continue;
+                }
+
+                $like = $this->db->escape($name);
+                $like_ru = $this->db->escape(trim($area['DescriptionRu']));
+
+                $zone = $this->db->query("SELECT zone_id FROM `" . DB_PREFIX . "zone` WHERE country_id = '" . (int)$country->row['country_id'] . "' AND status = '1' AND (name LIKE '" . $like . "%'" . ($like_ru !== '' ? " OR name LIKE '" . $like_ru . "%'" : "") . ") ORDER BY CHAR_LENGTH(name) ASC LIMIT 1");
+
+                if ($zone->num_rows) {
+                    $text = trim($area[$field]);
+
+                    $values[] = array('id' => (int)$zone->row['zone_id'], 'text' => ($text !== '' ? $text : $name));
+                }
+            }
+        }
+
+        return $values;
+    }
+
+    public function getOcnpCities($zone_id) {
+        $field = $this->ocnpField();
+        $rows = array();
+
+        $ref = $this->ocnpAreaRef($zone_id);
+
+        if ($ref) {
+            $query = $this->db->query("SELECT DISTINCT `" . $field . "` FROM `" . DB_PREFIX . "ocnp_novaposhta_cities` WHERE `Area` = '" . $this->db->escape($ref) . "' ORDER BY `" . $field . "`");
+
+            $rows = $query->rows;
+        }
+
+        return $this->ocnpValues($rows, $field);
+    }
+
+    public function getOcnpWarehouses($city_name) {
+        $field = $this->ocnpField();
+        $rows = array();
+        $city_name = trim($city_name);
+
+        if ($city_name !== '') {
+            $sql = "SELECT `Ref` FROM `" . DB_PREFIX . "ocnp_novaposhta_cities` WHERE `" . $field . "` = '" . $this->db->escape($city_name) . "'";
+
+            $area = $this->ocnpPostedAreaRef();
+
+            $cities = $area ? $this->db->query($sql . " AND `Area` = '" . $this->db->escape($area) . "'") : false;
+
+            if (!$cities || !$cities->num_rows) {
+                $cities = $this->db->query($sql);
+            }
+
+            $refs = array();
+
+            foreach ($cities->rows as $city) {
+                $refs[] = "'" . $this->db->escape($city['Ref']) . "'";
+            }
+
+            if ($refs) {
+                $query = $this->db->query("SELECT `" . $field . "` FROM `" . DB_PREFIX . "ocnp_novaposhta_warehouses` WHERE `CityRef` IN (" . implode(',', $refs) . ")");
+
+                $rows = $query->rows;
+            }
+        }
+
+        return $this->ocnpValues($rows, $field);
+    }
+    /* END OCNP Nova Poshta */
+            ]]></add>
+        </operation>
+    </file>
+</modification>
